@@ -1,0 +1,1420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SRTM3 HGT 3D Viewer (multi-tile + walk mode)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1020; font-family: system-ui, sans-serif; color: #e8eefc; }
+  #ui {
+    position: absolute; top: 10px; left: 10px; z-index: 10;
+    background: rgba(10,15,30,0.92); padding: 12px; border-radius: 8px;
+    border: 1px solid #2a3a5a; max-width: 440px; font-size: 13px;
+  }
+  #ui label { display: block; margin: 6px 0 2px; }
+  #ui input[type=range] { width: 100%; }
+  #ui input[type=file] { width: 100%; margin-bottom: 8px; }
+  #ui input[type=number], #ui input[type=text] {
+    background: #16202f; color: #e8eefc; border: 1px solid #4a6a9a;
+    border-radius: 3px; padding: 2px 6px; font-family: monospace; font-size: 12px;
+  }
+  #ui button { background: #2a3a5a; color: #e8eefc; border: 1px solid #4a6a9a; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin: 2px 2px 0 0; }
+  #ui button:hover:not(:disabled) { background: #3a4a6a; }
+  #ui button.active { background: #4a7aca; border-color: #7aaaff; }
+  #ui button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #ui .row { display: flex; gap: 6px; align-items: center; margin-top: 2px; }
+  #ui .row > input { flex: 1; }
+  #status { margin-top: 8px; color: #8fb8ff; font-size: 12px; white-space: pre-wrap; }
+  #hoverInfo { margin-top: 8px; padding: 6px 8px; background: rgba(20,30,50,0.7); border-radius: 4px; font-family: monospace; font-size: 12px; white-space: pre; }
+  #log {
+    margin-top: 8px; padding: 6px 8px; background: rgba(0,0,0,0.5); border-radius: 4px;
+    font-family: monospace; font-size: 11px; max-height: 160px; overflow-y: auto;
+    white-space: pre-wrap; border: 1px solid #2a3a5a; color: #b8d0ff;
+  }
+  #log .err { color: #ff8888; }
+  #log .ok  { color: #88ff88; }
+  #log .warn{ color: #ffcc66; }
+  #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); font-size: 20px; display: none; }
+  #crosshair {
+    position: absolute; top: 50%; left: 50%; z-index: 11;
+    width: 20px; height: 20px; margin: -10px 0 0 -10px;
+    pointer-events: none; display: none;
+  }
+  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #ffd76a; }
+  #crosshair::before { left: 9px; top: 0; width: 2px; height: 20px; }
+  #crosshair::after { top: 9px; left: 0; height: 2px; width: 20px; }
+  #walkHint {
+    position: absolute; top: 100px; left: 50%; transform: translateX(-50%);
+    background: rgba(10,15,30,0.9); padding: 8px 14px; border-radius: 6px;
+    border: 1px solid #7aaaff; z-index: 12; display: none; font-size: 14px;
+  }
+  #azimuthBox {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 11; padding: 6px 16px; background: rgba(10,15,30,0.85);
+    border: 1px solid #4a6a9a; border-radius: 6px;
+    font-family: monospace; font-size: 14px; display: none;
+  }
+  #gizmo {
+    position: absolute; bottom: 16px; right: 16px; z-index: 11;
+    width: 100px; height: 100px; display: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="ui">
+  <label><b>Load SRTM3 .hgt file(s)</b></label>
+  <input type="file" id="fileInput" accept=".hgt,.HGT" multiple />
+  <label>Vertical exaggeration: <span id="vexLabel">1.0</span>×</label>
+  <input type="range" id="vex" min="0.1" max="5" step="0.1" value="1" />
+  <label>Terrain detail (segments): <span id="segLabel">256</span></label>
+  <input type="range" id="seg" min="64" max="512" step="32" value="256" />
+  <label>Contour interval (m): <span id="conLabel">100</span></label>
+  <input type="range" id="con" min="20" max="500" step="10" value="100" />
+  <label>Walk eye height (m): <span id="eyeLabel">1.7</span></label>
+  <input type="range" id="eye" min="0.5" max="2000" step="0.5" value="1.7" />
+
+  <label>Pick latitude / longitude (deg)</label>
+  <div class="row">
+    <input type="number" id="latInput" step="0.00001" placeholder="lat" disabled />
+    <input type="number" id="lonInput" step="0.00001" placeholder="lon" disabled />
+    <button id="btnMovePick" disabled>Move</button>
+  </div>
+
+  <label>Visibility radius (cells, 1 cell ≈ 85 m)</label>
+  <div class="row">
+    <input type="number" id="radiusInput" min="1" step="1" value="300" />
+    <button id="btnApplyRadius">Apply</button>
+  </div>
+
+  <div style="margin-top:8px">
+    <button id="btnWalk" disabled>Walk Mode (G)</button>
+    <button id="btnRidge">Toggle Ridges</button>
+    <button id="btnContour">Toggle Contours</button>
+    <button id="btnTiles">Toggle Tile Borders</button>
+    <button id="btnWire">Toggle Wireframe</button>
+    <button id="btnReset">Reset View (R)</button>
+    <button id="btnClearPick">Clear Pick</button>
+  </div>
+  <div id="hoverInfo">Hover the terrain to see elevation.</div>
+  <div id="status">Ready. Choose one or more .hgt files, then click the terrain to pick a landing point.</div>
+  <div id="log"></div>
+</div>
+<div id="crosshair"></div>
+<div id="walkHint"></div>
+<div id="azimuthBox">Az: 000°</div>
+<canvas id="gizmo" width="100" height="100"></canvas>
+<div id="loading">Loading &amp; parsing…</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+const METRES_PER_CELL = 85;
+const SRTM3_EXPECTED = 1201 * 1201 * 2;
+const SRTM1_EXPECTED = 3601 * 3601 * 2;
+let VISION_RANGE_CELLS = 300;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b1020);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.5, 500000);
+camera.position.set(100000, 80000, 100000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.maxPolarAngle = Math.PI * 0.495;
+controls.screenSpacePanning = false;
+controls.keyPanSpeed = 80;
+controls.zoomSpeed = 1.2;
+controls.rotateSpeed = 0.9;
+controls.panSpeed = 1.0;
+controls.minDistance = 1;
+controls.maxDistance = 500000;
+controls.enablePan = true;
+
+const walkControls = new PointerLockControls(camera, renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0xbcd6ff, 0x2a2010, 1.0));
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(1, 2, 1).normalize().multiplyScalar(200000);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0x88aaff, 0.6);
+fill.position.set(-1, 0.5, -0.5).normalize().multiplyScalar(200000);
+scene.add(fill);
+
+let terrainMesh = null;
+let ridgeGroup = null;
+let contourGroup = null;
+let tileBorderGroup = null;
+
+let currentData = null;
+let currentWidth = 0;
+let currentHeight = 0;
+let currentExtentX = 0;
+let currentExtentZ = 0;
+let heightStats = { min: 0, max: 0 };
+let currentPeak = null;
+let mode = 'orbit';
+
+// Geo origin of the stitched grid (NW corner, integer degrees)
+let gridLat0 = null;   // north edge latitude
+let gridLon0 = null;   // west edge longitude
+let gridLatSpan = 0;   // total degrees N→S
+let gridLonSpan = 0;   // total degrees W→E
+
+const keys = {};
+
+let tileMap = null;
+let tileFilenames = [];
+let tileRanges = [];
+
+let pickPoint = null;
+let startMarker = null;
+let visionMesh = null;
+const raycaster = new THREE.Raycaster();
+const mouseNDC = new THREE.Vector2(-10, -10);
+
+const fileInput = document.getElementById('fileInput');
+const vexSlider = document.getElementById('vex');
+const segSlider = document.getElementById('seg');
+const conSlider = document.getElementById('con');
+const eyeSlider = document.getElementById('eye');
+const statusEl = document.getElementById('status');
+const loadingEl = document.getElementById('loading');
+const hoverInfoEl = document.getElementById('hoverInfo');
+const crosshairEl = document.getElementById('crosshair');
+const walkHintEl = document.getElementById('walkHint');
+const azimuthBox = document.getElementById('azimuthBox');
+const gizmoEl = document.getElementById('gizmo');
+const gizmoCtx = gizmoEl.getContext('2d');
+const logEl = document.getElementById('log');
+const btnWalk = document.getElementById('btnWalk');
+const latInput = document.getElementById('latInput');
+const lonInput = document.getElementById('lonInput');
+const btnMovePick = document.getElementById('btnMovePick');
+const radiusInput = document.getElementById('radiusInput');
+const btnApplyRadius = document.getElementById('btnApplyRadius');
+let showRidges = false;
+let showContours = true;
+let showTileBorders = false;
+let wireframe = false;
+
+function eyeHeight() { return +eyeSlider.value; }
+
+function log(msg, cls) {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+  if (cls === 'err') console.error(msg);
+  else if (cls === 'warn') console.warn(msg);
+  else console.log(msg);
+}
+
+function updateWalkButtonState() {
+  const enabled = !!pickPoint && !!currentData && mode === 'orbit';
+  btnWalk.disabled = !enabled;
+  btnWalk.title = enabled ? '' : (currentData ? 'Click the terrain first to pick a landing point' : 'Load a tile first');
+}
+
+function updatePickInputs() {
+  if (pickPoint && gridLat0 !== null) {
+    const { lat, lon } = gridToLatLon(pickPoint.gx, pickPoint.gy);
+    latInput.value = lat.toFixed(5);
+    lonInput.value = lon.toFixed(5);
+    latInput.disabled = false;
+    lonInput.disabled = false;
+    btnMovePick.disabled = false;
+  } else {
+    latInput.value = '';
+    lonInput.value = '';
+    latInput.disabled = true;
+    lonInput.disabled = true;
+    btnMovePick.disabled = true;
+  }
+}
+
+// Grid (integer cell) → lat/lon. Uses grid origin + span derived from stitched tiles.
+function gridToLatLon(gx, gy) {
+  if (gridLat0 === null) return { lat: 0, lon: 0 };
+  const lon = gridLon0 + (gx / (currentWidth - 1)) * gridLonSpan;
+  const lat = gridLat0 - (gy / (currentHeight - 1)) * gridLatSpan;
+  return { lat, lon };
+}
+
+function latLonToGrid(lat, lon) {
+  if (gridLat0 === null) return { gx: 0, gy: 0 };
+  const gx = ((lon - gridLon0) / gridLonSpan) * (currentWidth - 1);
+  const gy = ((gridLat0 - lat) / gridLatSpan) * (currentHeight - 1);
+  return { gx, gy };
+}
+
+// ---------------------------------------------------------------------------
+// Load
+// ---------------------------------------------------------------------------
+fileInput.addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files);
+  if (!files.length) { log('No files selected.', 'warn'); return; }
+  logEl.innerHTML = '';
+  clearPick();
+  log('Selected ' + files.length + ' file(s)');
+  files.forEach((f, i) => log('  [' + (i+1) + '] ' + f.name + '  (' + f.size + ' bytes)'));
+
+  try {
+    loadingEl.style.display = 'block';
+    loadingEl.textContent = 'Loading 0/' + files.length + '…';
+    await new Promise(r => setTimeout(r, 20));
+
+    const t0 = performance.now();
+    const parsedTiles = [];
+    const errors = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      loadingEl.textContent = 'Loading ' + (i+1) + '/' + files.length + '…';
+      await new Promise(r => setTimeout(r, 0));
+      try {
+        const buf = await file.arrayBuffer();
+        parsedTiles.push(parseHGT(buf, file.name));
+      } catch (err) {
+        errors.push(file.name + ': ' + err.message);
+        log('  PARSE FAILED: ' + file.name + ': ' + err.message, 'err');
+      }
+    }
+    const tParse = performance.now();
+    log('Parsed ' + parsedTiles.length + ' of ' + files.length + ' in ' + (tParse - t0).toFixed(0) + ' ms');
+
+    if (!parsedTiles.length) throw new Error('No usable tiles.\n' + errors.join('\n'));
+
+    loadingEl.style.display = 'block';
+    loadingEl.textContent = 'Stitching…';
+    await new Promise(r => setTimeout(r, 0));
+
+    const stitched = stitchTiles(parsedTiles);
+    log('Stitch OK: grid=' + stitched.width + '×' + stitched.height +
+        ', min=' + stitched.stats.min.toFixed(0) + ', max=' + stitched.stats.max.toFixed(0), 'ok');
+
+    currentData = stitched.data;
+    currentWidth = stitched.width;
+    currentHeight = stitched.height;
+    currentExtentX = (currentWidth - 1) * METRES_PER_CELL;
+    currentExtentZ = (currentHeight - 1) * METRES_PER_CELL;
+    heightStats = stitched.stats;
+    tileMap = stitched.tileMap;
+    tileFilenames = stitched.tileFilenames;
+    tileRanges = stitched.tileRanges;
+
+    gridLat0 = stitched.lat0;
+    gridLon0 = stitched.lon0;
+    gridLatSpan = stitched.latSpan;
+    gridLonSpan = stitched.lonSpan;
+
+    const tStitch = performance.now();
+
+    loadingEl.style.display = 'block';
+    loadingEl.textContent = 'Building mesh…';
+    await new Promise(r => setTimeout(r, 0));
+
+    rebuildAll();
+    const tEnd = performance.now();
+
+    statusEl.textContent =
+      parsedTiles.length + ' tile(s) stitched' +
+      (errors.length ? ' (' + errors.length + ' skipped)' : '') + '\n' +
+      'Grid: ' + currentWidth + ' × ' + currentHeight + '\n' +
+      'Extent: ' + (currentExtentX/1000).toFixed(1) + ' km × ' + (currentExtentZ/1000).toFixed(1) + ' km\n' +
+      'Geo: lat ' + (gridLat0).toFixed(0) + ' → ' + (gridLat0 - gridLatSpan).toFixed(0) +
+      ', lon ' + (gridLon0).toFixed(0) + ' → ' + (gridLon0 + gridLonSpan).toFixed(0) + '\n' +
+      'Elevation: ' + stitched.stats.min.toFixed(0) + ' m … ' + stitched.stats.max.toFixed(0) + ' m\n' +
+      'Click the terrain to pick a landing point. Then Walk Mode becomes available.\n' +
+      'Load: parse ' + (tParse - t0).toFixed(0) + ' ms · stitch ' + (tStitch - tParse).toFixed(0) + ' ms · build ' + (tEnd - tStitch).toFixed(0) + ' ms · total ' + (tEnd - t0).toFixed(0) + ' ms' +
+      (errors.length ? '\n\nSkipped:\n' + errors.join('\n') : '');
+  } catch (err) {
+    console.error(err);
+    log('FATAL: ' + err.message, 'err');
+    statusEl.textContent = 'Error: ' + err.message;
+  } finally {
+    loadingEl.style.display = 'none';
+    loadingEl.textContent = 'Loading & parsing…';
+    updateWalkButtonState();
+    updatePickInputs();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// UI events
+// ---------------------------------------------------------------------------
+vexSlider.addEventListener('input', () => {
+  document.getElementById('vexLabel').textContent = (+vexSlider.value).toFixed(1);
+  if (currentData) rebuildTerrain();
+  updateOverlays();
+  if (pickPoint && mode === 'orbit') rebuildVision();
+});
+segSlider.addEventListener('input', () => {
+  document.getElementById('segLabel').textContent = segSlider.value;
+  if (currentData) rebuildTerrain();
+  if (pickPoint && mode === 'orbit') rebuildVision();
+});
+conSlider.addEventListener('input', () => {
+  document.getElementById('conLabel').textContent = conSlider.value;
+  if (showContours) rebuildContours();
+});
+eyeSlider.addEventListener('input', () => {
+  document.getElementById('eyeLabel').textContent = (+eyeSlider.value).toFixed(1);
+  if (mode === 'walk') {
+    const vex = vexScale();
+    const g = worldToGrid(camera.position.x, camera.position.z);
+    const groundY = sampleElevation(g.gx, g.gy) * vex;
+    camera.position.y = groundY + eyeHeight();
+  }
+  if (pickPoint && mode === 'orbit') rebuildVision();
+});
+
+document.getElementById('btnRidge').addEventListener('click', () => {
+  showRidges = !showRidges;
+  if (showRidges) rebuildRidges();
+  else if (ridgeGroup) { scene.remove(ridgeGroup); ridgeGroup = null; }
+});
+document.getElementById('btnContour').addEventListener('click', () => {
+  showContours = !showContours;
+  if (showContours) rebuildContours();
+  else if (contourGroup) { scene.remove(contourGroup); contourGroup = null; }
+});
+document.getElementById('btnTiles').addEventListener('click', () => {
+  showTileBorders = !showTileBorders;
+  if (showTileBorders) rebuildTileBorders();
+  else if (tileBorderGroup) { scene.remove(tileBorderGroup); tileBorderGroup = null; }
+});
+document.getElementById('btnWire').addEventListener('click', () => {
+  wireframe = !wireframe;
+  if (terrainMesh) terrainMesh.material.wireframe = wireframe;
+});
+document.getElementById('btnReset').addEventListener('click', resetView);
+document.getElementById('btnClearPick').addEventListener('click', clearPick);
+btnWalk.addEventListener('click', toggleWalkMode);
+
+// Lat/lon → move the pick
+function applyLatLon() {
+  if (!currentData || gridLat0 === null) return;
+  const lat = parseFloat(latInput.value);
+  const lon = parseFloat(lonInput.value);
+  if (!isFinite(lat) || !isFinite(lon)) { log('Move: invalid lat/lon', 'warn'); return; }
+  if (lat > gridLat0 || lat < gridLat0 - gridLatSpan ||
+      lon < gridLon0 || lon > gridLon0 + gridLonSpan) {
+    log('Move: (' + lat.toFixed(5) + ', ' + lon.toFixed(5) + ') is outside the loaded area', 'warn');
+    return;
+  }
+  const { gx, gy } = latLonToGrid(lat, lon);
+  const elev = sampleElevation(gx, gy);
+  pickPoint = { gx, gy, elev };
+  ensureStartMarker();
+  const vex = vexScale();
+  const wx = gridToWorldX(gx);
+  const wz = gridToWorldZ(gy);
+  startMarker.position.set(wx, elev * vex + 0.5, wz);
+  startMarker.visible = true;
+  rebuildVision();
+  positionCrosshairAtPick();
+  updateWalkButtonState();
+  log('Move: pick set to (' + lat.toFixed(5) + ', ' + lon.toFixed(5) + ') @ ' + elev.toFixed(0) + ' m');
+}
+btnMovePick.addEventListener('click', applyLatLon);
+latInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyLatLon(); });
+lonInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyLatLon(); });
+
+// Radius
+function applyRadius() {
+  const v = parseInt(radiusInput.value, 10);
+  if (!isFinite(v) || v < 1) { log('Radius: must be ≥ 1 cell', 'warn'); return; }
+  VISION_RANGE_CELLS = v;
+  log('Radius: ' + VISION_RANGE_CELLS + ' cells (≈ ' + (VISION_RANGE_CELLS * METRES_PER_CELL / 1000).toFixed(2) + ' km)');
+  if (pickPoint && mode === 'orbit') rebuildVision();
+}
+btnApplyRadius.addEventListener('click', applyRadius);
+radiusInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyRadius(); });
+radiusInput.addEventListener('change', applyRadius);
+
+renderer.domElement.addEventListener('wheel', (e) => {
+  if (mode !== 'walk') return;
+  e.preventDefault();
+  const step = e.deltaY > 0 ? -0.5 : 0.5;
+  const v = Math.max(0.5, Math.min(2000, (+eyeSlider.value) + step));
+  eyeSlider.value = v;
+  document.getElementById('eyeLabel').textContent = v.toFixed(1);
+  const vex = vexScale();
+  const g = worldToGrid(camera.position.x, camera.position.z);
+  const groundY = sampleElevation(g.gx, g.gy) * vex;
+  camera.position.y = groundY + v;
+}, { passive: false });
+
+addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'KeyR') resetView();
+  if (e.code === 'KeyG') toggleWalkMode();
+  if (e.code === 'Escape' && mode === 'walk') toggleWalkMode();
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+renderer.domElement.addEventListener('mousemove', (e) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+});
+
+addEventListener('keydown', (e) => {
+  if (mode !== 'orbit' || !currentData) return;
+  if (e.target.tagName === 'INPUT') return;
+  const step = Math.max(currentExtentX, currentExtentZ) * 0.02;
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0,1,0)).normalize();
+  const pan = new THREE.Vector3();
+  if (e.code === 'KeyW') pan.add(dir);
+  if (e.code === 'KeyS') pan.sub(dir);
+  if (e.code === 'KeyD') pan.add(right);
+  if (e.code === 'KeyA') pan.sub(right);
+  if (pan.lengthSq() > 0) {
+    pan.normalize().multiplyScalar(step);
+    controls.target.add(pan);
+    camera.position.add(pan);
+    controls.update();
+    e.preventDefault();
+    return;
+  }
+  if (e.code === 'KeyQ' || e.code === 'KeyE') {
+    const angle = (e.code === 'KeyQ' ? 1 : -1) * 0.1;
+    const offset = new THREE.Vector3().subVectors(camera.position, controls.target);
+    const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), angle);
+    offset.applyQuaternion(q);
+    camera.position.copy(controls.target).add(offset);
+    controls.update();
+    e.preventDefault();
+  }
+  if (e.code === 'Equal' || e.code === 'Minus' || e.code === 'NumpadAdd' || e.code === 'NumpadSubtract') {
+    const dir2 = new THREE.Vector3().subVectors(camera.position, controls.target);
+    const len = dir2.length();
+    const factor = (e.code === 'Equal' || e.code === 'NumpadAdd') ? 0.85 : 1.15;
+    dir2.setLength(Math.max(controls.minDistance, Math.min(controls.maxDistance, len * factor)));
+    camera.position.copy(controls.target).add(dir2);
+    controls.update();
+    e.preventDefault();
+  }
+}, { passive: false });
+
+// ---------------------------------------------------------------------------
+// HGT parsing
+// ---------------------------------------------------------------------------
+function parseHGT(arrayBuffer, filename) {
+  const bytes = arrayBuffer.byteLength;
+  let size;
+  if (bytes === SRTM3_EXPECTED) size = 1201;
+  else if (bytes === SRTM1_EXPECTED) size = 3601;
+  else if (bytes > SRTM3_EXPECTED && bytes < SRTM3_EXPECTED + 65536) size = 1201;
+  else if (bytes > SRTM1_EXPECTED && bytes < SRTM1_EXPECTED + 65536) size = 3601;
+  else {
+    const n = Math.round(Math.sqrt(bytes / 2));
+    if (n * n * 2 === bytes) size = n;
+    else throw new Error(
+      'Unrecognized .hgt size: ' + bytes + ' bytes (expected ' + SRTM3_EXPECTED + ' SRTM3 or ' + SRTM1_EXPECTED + ' SRTM1)'
+    );
+  }
+  const view = new DataView(arrayBuffer);
+  const total = size * size;
+  const heights = new Float32Array(total);
+  let min = Infinity, max = -Infinity;
+  let peak = { x: 0, y: 0, h: -Infinity };
+  const maxIdx = Math.min(total, Math.floor(bytes / 2));
+  for (let i = 0; i < maxIdx; i++) {
+    let h = view.getInt16(i * 2, false);
+    if (h === -32768 || h < -1000) h = 0;
+    heights[i] = h;
+    if (h < min) min = h;
+    if (h > max) { max = h; peak.h = h; peak.x = i % size; peak.y = Math.floor(i/size); }
+  }
+  const data = new Array(size);
+  for (let y = 0; y < size; y++) data[y] = heights.subarray(y * size, (y + 1) * size);
+  const m = /([NS])(\d{2})([EW])(\d{3})/i.exec(filename || '');
+  let lat = null, lon = null;
+  if (m) {
+    lat = (m[1].toUpperCase() === 'N' ? 1 : -1) * parseInt(m[2], 10);
+    lon = (m[3].toUpperCase() === 'E' ? 1 : -1) * parseInt(m[4], 10);
+  }
+  return { size, heights, data, stats: { min, max }, peak, lat, lon, filename };
+}
+
+// ---------------------------------------------------------------------------
+// Stitch — also reports grid geo origin and span
+// ---------------------------------------------------------------------------
+function stitchTiles(tiles) {
+  if (!tiles.length) throw new Error('No tiles');
+  const sizeSet = new Set(tiles.map(t => t.size));
+  if (sizeSet.size > 1) throw new Error('Mixed HGT resolutions: ' + Array.from(sizeSet).join(', '));
+
+  const tileSize = tiles[0].size;
+  const allGeo = tiles.every(t => t.lat !== null && t.lon !== null);
+
+  let cols, rows, positions, minLat, maxLat, minLon, maxLon;
+  if (tiles.length === 1) {
+    cols = 1; rows = 1;
+    positions = [{ col: 0, row: 0, tile: tiles[0], idx: 0 }];
+    minLat = tiles[0].lat ?? 0; maxLat = minLat;
+    minLon = tiles[0].lon ?? 0; maxLon = minLon;
+  } else if (allGeo) {
+    const lats = tiles.map(t => t.lat);
+    const lons = tiles.map(t => t.lon);
+    minLat = Math.min(...lats); maxLat = Math.max(...lats);
+    minLon = Math.min(...lons); maxLon = Math.max(...lons);
+    cols = (maxLon - minLon) + 1;
+    rows = (maxLat - minLat) + 1;
+    positions = tiles.map((t, idx) => ({
+      col: t.lon - minLon, row: maxLat - t.lat, tile: t, idx
+    }));
+  } else {
+    cols = tiles.length; rows = 1;
+    positions = tiles.map((t, idx) => ({ col: idx, row: 0, tile: t, idx }));
+    minLat = 0; maxLat = 0; minLon = 0; maxLon = 0;
+  }
+
+  const width = cols * (tileSize - 1) + 1;
+  const height = rows * (tileSize - 1) + 1;
+  log('  combined grid: ' + width + '×' + height);
+
+  const data = new Array(height);
+  for (let y = 0; y < height; y++) data[y] = new Float32Array(width);
+  const filled = new Uint8Array(width * height);
+  const NO_TILE = 0xFFFF;
+  const tileMap = new Uint16Array(width * height);
+  tileMap.fill(NO_TILE);
+
+  let min = Infinity, max = -Infinity;
+  let peak = { x: 0, y: 0, h: -Infinity };
+
+  for (const p of positions) {
+    const t = p.tile;
+    const ox = p.col * (tileSize - 1);
+    const oy = p.row * (tileSize - 1);
+    for (let y = 0; y < tileSize; y++) {
+      const gy = oy + y;
+      if (gy < 0 || gy >= height) continue;
+      const dst = data[gy];
+      const src = t.data[y];
+      for (let x = 0; x < tileSize; x++) {
+        const gx = ox + x;
+        if (gx < 0 || gx >= width) continue;
+        const h = src[x];
+        dst[gx] = h;
+        filled[gy * width + gx] = 1;
+        tileMap[gy * width + gx] = p.idx;
+        if (h < min) min = h;
+        if (h > max) { max = h; peak.h = h; peak.x = gx; peak.y = gy; }
+      }
+    }
+  }
+
+  for (let y = 0; y < height; y++) {
+    const row = data[y];
+    let last = 0;
+    for (let x = 0; x < width; x++) {
+      if (filled[y * width + x]) last = row[x]; else row[x] = last;
+    }
+    last = 0;
+    for (let x = width - 1; x >= 0; x--) {
+      if (filled[y * width + x]) last = row[x]; else row[x] = last;
+    }
+  }
+
+  maskBorderZero(data, width, height);
+
+  // Geo span: from NW corner (maxLat, minLon) to SE corner (minLat+1, maxLon+1)
+  const lat0 = maxLat + 1;
+  const lon0 = minLon;
+  const latSpan = rows;
+  const lonSpan = cols;
+
+  return {
+    width, height, data, stats: { min, max }, peak,
+    tileMap, tileFilenames: tiles.map(t => t.filename),
+    tileRanges: positions.map(p => ({
+      ox: p.col * (tileSize - 1), oy: p.row * (tileSize - 1), size: tileSize
+    })),
+    lat0, lon0, latSpan, lonSpan
+  };
+}
+
+function maskBorderZero(data, width, height) {
+  const outside = new Uint8Array(width * height);
+  const stack = [];
+  function isZero(x, y) { const v = data[y][x]; return !isNaN(v) && Math.abs(v) < 0.5; }
+  function push(x, y) {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const idx = y * width + x;
+    if (outside[idx] || !isZero(x, y)) return;
+    outside[idx] = 1;
+    stack.push(x, y);
+  }
+  for (let x = 0; x < width; x++) { push(x, 0); push(x, height - 1); }
+  for (let y = 0; y < height; y++) { push(0, y); push(width - 1, y); }
+  while (stack.length) {
+    const y = stack.pop(); const x = stack.pop();
+    push(x + 1, y); push(x - 1, y); push(x, y + 1); push(x, y - 1);
+  }
+  for (let y = 0; y < height; y++) {
+    const row = data[y];
+    for (let x = 0; x < width; x++) if (outside[y * width + x]) row[x] = NaN;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Grid ↔ world
+// ---------------------------------------------------------------------------
+function vexScale() { return +vexSlider.value; }
+function gridToWorldX(gx) { return (gx / (currentWidth - 1) - 0.5) * currentExtentX; }
+function gridToWorldZ(gy) { return (gy / (currentHeight - 1) - 0.5) * currentExtentZ; }
+function worldToGrid(wx, wz) {
+  return {
+    gx: (wx / currentExtentX + 0.5) * (currentWidth - 1),
+    gy: (wz / currentExtentZ + 0.5) * (currentHeight - 1)
+  };
+}
+function sampleElevation(gx, gy) {
+  gx = Math.max(0, Math.min(currentWidth - 1, gx));
+  gy = Math.max(0, Math.min(currentHeight - 1, gy));
+  const x0 = Math.floor(gx), y0 = Math.floor(gy);
+  const x1 = Math.min(currentWidth - 1, x0 + 1);
+  const y1 = Math.min(currentHeight - 1, y0 + 1);
+  const fx = gx - x0, fy = gy - y0;
+  const a = currentData[y0][x0] * (1 - fx) + currentData[y0][x1] * fx;
+  const b = currentData[y1][x0] * (1 - fx) + currentData[y1][x1] * fx;
+  const av = isNaN(a) ? 0 : a;
+  const bv = isNaN(b) ? 0 : b;
+  const res = av * (1 - fy) + bv * fy;
+  return isNaN(res) ? 0 : res;
+}
+function sampleElevationWorld(wx, wz) {
+  const g = worldToGrid(wx, wz);
+  return sampleElevation(g.gx, g.gy);
+}
+
+// ---------------------------------------------------------------------------
+// Terrain
+// ---------------------------------------------------------------------------
+function rebuildAll() {
+  rebuildTerrain();
+  if (showContours) rebuildContours();
+  if (showRidges) rebuildRidges();
+  if (showTileBorders) rebuildTileBorders();
+  resetView();
+  if (pickPoint) rebuildVision();
+}
+
+function rebuildTerrain() {
+  if (!currentData || currentWidth < 2 || currentHeight < 2) return;
+  if (terrainMesh) {
+    scene.remove(terrainMesh);
+    terrainMesh.geometry.dispose();
+    terrainMesh.material.dispose();
+    terrainMesh = null;
+  }
+  const W = currentWidth, H = currentHeight;
+  const segW = Math.max(1, Math.min(+segSlider.value, W - 1));
+  const segH = Math.max(1, Math.round(segW * (H - 1) / (W - 1)));
+  const vex = vexScale();
+
+  const geo = new THREE.PlaneGeometry(currentExtentX, currentExtentZ, segW, segH);
+  const pos = geo.attributes.position;
+  const nx = segW + 1, ny = segH + 1;
+
+  let sMin = Infinity, sMax = -Infinity;
+  const hbuf = new Float32Array(nx * ny);
+  for (let iy = 0; iy < ny; iy++) {
+    const gy = Math.round(iy / segH * (H - 1));
+    const row = currentData[gy];
+    for (let ix = 0; ix < nx; ix++) {
+      const gx = Math.round(ix / segW * (W - 1));
+      const h = row[gx];
+      hbuf[iy * nx + ix] = h;
+      if (!isNaN(h)) {
+        if (h < sMin) sMin = h;
+        if (h > sMax) sMax = h;
+      }
+    }
+  }
+  if (!isFinite(sMin)) { sMin = 0; sMax = 1; }
+
+  const colors = new Float32Array(pos.count * 3);
+  const c = new THREE.Color();
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const i = iy * nx + ix;
+      const h = hbuf[i];
+      if (isNaN(h)) {
+        pos.setZ(i, 0);
+        colors[i*3] = 0; colors[i*3+1] = 0; colors[i*3+2] = 0;
+      } else {
+        pos.setZ(i, h * vex);
+        const t = (h - sMin) / Math.max(1, sMax - sMin);
+        colorForElevation(t, h, c);
+        colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+      }
+    }
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.95, metalness: 0.0,
+    wireframe, side: THREE.FrontSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI/2;
+  scene.add(mesh);
+  terrainMesh = mesh;
+  currentPeak = findPeak();
+}
+
+function findPeak() {
+  let best = { h: -Infinity, x: 0, y: 0 };
+  for (let y = 0; y < currentHeight; y++) {
+    const row = currentData[y];
+    for (let x = 0; x < currentWidth; x++) {
+      if (row[x] > best.h) { best.h = row[x]; best.x = x; best.y = y; }
+    }
+  }
+  return best;
+}
+
+function colorForElevation(t, h, out) {
+  if (h < 0) { out.setRGB(0.15, 0.25, 0.55); return; }
+  if (t < 0.15) { out.setRGB(0.18, 0.42, 0.18); return; }
+  if (t < 0.35) { out.setRGB(0.35, 0.55, 0.22); return; }
+  if (t < 0.55) { out.setRGB(0.62, 0.55, 0.30); return; }
+  if (t < 0.75) { out.setRGB(0.55, 0.42, 0.30); return; }
+  if (t < 0.9)  { out.setRGB(0.62, 0.60, 0.60); return; }
+  out.setRGB(0.95, 0.95, 1.0);
+}
+
+// ---------------------------------------------------------------------------
+// Vision overlay
+// ---------------------------------------------------------------------------
+function clearPick() {
+  pickPoint = null;
+  if (startMarker) startMarker.visible = false;
+  if (visionMesh) {
+    scene.remove(visionMesh);
+    visionMesh.geometry.dispose();
+    visionMesh.material.dispose();
+    visionMesh = null;
+  }
+  crosshairEl.style.display = 'none';
+  updateWalkButtonState();
+  updatePickInputs();
+}
+
+function ensureStartMarker() {
+  if (startMarker) { startMarker.visible = true; return; }
+  const geo = new THREE.RingGeometry(8, 14, 40);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffd76a, side: THREE.DoubleSide, transparent: true, opacity: 0.95,
+    depthTest: false,
+  });
+  startMarker = new THREE.Mesh(geo, mat);
+  startMarker.rotation.x = -Math.PI / 2;
+  startMarker.renderOrder = 999;
+  startMarker.visible = false;
+  scene.add(startMarker);
+}
+
+function computeVisibleCells(gx0, gy0, elev0) {
+  const W = currentWidth, H = currentHeight;
+  const vis = new Uint8Array(W * H);
+  const eyeLift = eyeHeight();
+
+  const x0 = Math.max(0, Math.floor(gx0 - VISION_RANGE_CELLS));
+  const x1 = Math.min(W - 1, Math.ceil(gx0 + VISION_RANGE_CELLS));
+  const y0 = Math.max(0, Math.floor(gy0 - VISION_RANGE_CELLS));
+  const y1 = Math.min(H - 1, Math.ceil(gy0 + VISION_RANGE_CELLS));
+
+  const sourceElev = elev0 + eyeLift;
+
+  for (let gy = y0; gy <= y1; gy++) {
+    for (let gx = x0; gx <= x1; gx++) {
+      const v = currentData[gy][gx];
+      if (isNaN(v)) continue;
+
+      const dx = gx - gx0;
+      const dy = gy - gy0;
+      const dist = Math.hypot(dx, dy);
+      if (dist === 0) { vis[gy * W + gx] = 1; continue; }
+      if (dist > VISION_RANGE_CELLS) continue;
+
+      const targetElev = v;
+      const steps = Math.ceil(dist);
+      let blocked = false;
+      for (let s = 1; s < steps; s++) {
+        const t = s / steps;
+        const mx = Math.round(gx0 + dx * t);
+        const my = Math.round(gy0 + dy * t);
+        if (mx < 0 || my < 0 || mx >= W || my >= H) break;
+        const mid = currentData[my][mx];
+        if (isNaN(mid)) { blocked = true; break; }
+        const lineElev = sourceElev + (targetElev - sourceElev) * t;
+        if (mid > lineElev + 0.5) { blocked = true; break; }
+      }
+      if (!blocked) vis[gy * W + gx] = 1;
+    }
+  }
+  return vis;
+}
+
+function rebuildVision() {
+  if (!pickPoint || !terrainMesh) return;
+  if (mode !== 'orbit') {
+    if (visionMesh) visionMesh.visible = false;
+    return;
+  }
+
+  const W = currentWidth, H = currentHeight;
+  const vex = vexScale();
+
+  const t0 = performance.now();
+  const vis = computeVisibleCells(pickPoint.gx, pickPoint.gy, pickPoint.elev);
+  const t1 = performance.now();
+
+  let count = 0;
+  for (let i = 0; i < vis.length; i++) if (vis[i]) count++;
+  log('  vision (eye ' + eyeHeight().toFixed(1) + ' m, radius ' + VISION_RANGE_CELLS +
+      ' cells): ' + count + ' cells visible (' + (t1 - t0).toFixed(0) + ' ms)');
+
+  if (visionMesh) {
+    scene.remove(visionMesh);
+    visionMesh.geometry.dispose();
+    visionMesh.material.dispose();
+    visionMesh = null;
+  }
+  if (count === 0) return;
+
+  const positions = [];
+  const indices = [];
+  const vertIndex = new Map();
+  function vertexFor(ix, iy) {
+    const k = iy * W + ix;
+    if (vertIndex.has(k)) return vertIndex.get(k);
+    const wx = (ix / (W - 1) - 0.5) * currentExtentX;
+    const wz = (iy / (H - 1) - 0.5) * currentExtentZ;
+    const h = currentData[iy][ix];
+    const wy = isNaN(h) ? 0 : h * vex + 0.3;
+    const idx = positions.length / 3;
+    positions.push(wx, wy, wz);
+    vertIndex.set(k, idx);
+    return idx;
+  }
+
+  for (let gy = 0; gy < H - 1; gy++) {
+    for (let gx = 0; gx < W - 1; gx++) {
+      const a = vis[gy * W + gx];
+      const b = vis[gy * W + gx + 1];
+      const c = vis[(gy+1) * W + gx];
+      const d = vis[(gy+1) * W + gx + 1];
+      if (!(a || b || c || d)) continue;
+      if (isNaN(currentData[gy][gx]) || isNaN(currentData[gy][gx+1]) ||
+          isNaN(currentData[gy+1][gx]) || isNaN(currentData[gy+1][gx+1])) continue;
+      const i0 = vertexFor(gx, gy);
+      const i1 = vertexFor(gx+1, gy);
+      const i2 = vertexFor(gx, gy+1);
+      const i3 = vertexFor(gx+1, gy+1);
+      indices.push(i0, i2, i1);
+      indices.push(i1, i2, i3);
+    }
+  }
+
+  if (indices.length === 0) return;
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xff3333, transparent: true, opacity: 0.6,
+    side: THREE.DoubleSide, depthWrite: false,
+  });
+  visionMesh = new THREE.Mesh(geo, mat);
+  visionMesh.renderOrder = 5;
+  scene.add(visionMesh);
+}
+
+// ---------------------------------------------------------------------------
+// Reset
+// ---------------------------------------------------------------------------
+function resetView() {
+  if (mode !== 'orbit') return;
+  if (!currentPeak || !currentData) return;
+  const vex = vexScale();
+  const wx = gridToWorldX(currentPeak.x);
+  const wz = gridToWorldZ(currentPeak.y);
+  const wy = currentPeak.h * vex;
+  controls.target.set(wx, wy, wz);
+  const maxExt = Math.max(currentExtentX, currentExtentZ);
+  const dist = maxExt * 0.45;
+  camera.position.set(wx + dist * 0.9, wy + dist * 0.7, wz + dist * 0.9);
+  camera.near = Math.max(0.5, maxExt * 0.0005);
+  camera.far  = maxExt * 20;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+// ---------------------------------------------------------------------------
+// Walk mode
+// ---------------------------------------------------------------------------
+function toggleWalkMode() {
+  if (!currentData) { log('Walk mode: no data loaded.', 'warn'); return; }
+
+  if (mode === 'orbit') {
+    if (!pickPoint) {
+      log('Walk mode: pick a landing point first by clicking the terrain.', 'warn');
+      return;
+    }
+    const elev = pickPoint.elev;
+    const pt = {
+      x: gridToWorldX(pickPoint.gx),
+      z: gridToWorldZ(pickPoint.gy),
+    };
+    if (visionMesh) visionMesh.visible = false;
+    if (startMarker) startMarker.visible = false;
+
+    camera.position.set(pt.x, elev * vexScale() + eyeHeight(), pt.z);
+    if (currentPeak) {
+      camera.lookAt(
+        gridToWorldX(currentPeak.x),
+        currentPeak.h * vexScale(),
+        gridToWorldZ(currentPeak.y)
+      );
+    }
+
+    mode = 'walk';
+    walkHintEl.style.display = 'block';
+    walkHintEl.textContent = 'WASD to move, mouse to look, scroll to change height, Esc to exit.';
+    crosshairEl.style.display = 'block';
+    crosshairEl.style.left = '50%';
+    crosshairEl.style.top = '50%';
+    crosshairEl.style.marginLeft = '-10px';
+    crosshairEl.style.marginTop = '-10px';
+    btnWalk.classList.add('active');
+    btnWalk.disabled = true;
+    gizmoEl.style.display = 'block';
+    azimuthBox.style.display = 'block';
+    controls.enabled = false;
+    walkControls.lock();
+    log('Walk mode: standing at (' + pt.x.toFixed(0) + ',' + (elev*vexScale()+eyeHeight()).toFixed(0) + ',' + pt.z.toFixed(0) + ')');
+  } else {
+    mode = 'orbit';
+    if (walkControls.isLocked) walkControls.unlock();
+    walkHintEl.style.display = 'none';
+    btnWalk.classList.remove('active');
+    controls.enabled = true;
+    gizmoEl.style.display = 'none';
+    azimuthBox.style.display = 'none';
+    const g = worldToGrid(camera.position.x, camera.position.z);
+    const groundY = sampleElevation(g.gx, g.gy) * vexScale();
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    controls.target.set(
+      camera.position.x + dir.x * 1000,
+      groundY,
+      camera.position.z + dir.z * 1000
+    );
+    controls.update();
+    if (pickPoint) {
+      rebuildVision();
+      positionCrosshairAtPick();
+    }
+    updateWalkButtonState();
+    log('Walk mode: exited');
+  }
+}
+
+function positionCrosshairAtPick() {
+  if (!pickPoint || mode === 'walk') return;
+  const wx = gridToWorldX(pickPoint.gx);
+  const wz = gridToWorldZ(pickPoint.gy);
+  const wy = pickPoint.elev * vexScale() + 0.5;
+  const v = new THREE.Vector3(wx, wy, wz).project(camera);
+  if (v.z > 1) {
+    crosshairEl.style.display = 'none';
+    return;
+  }
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = (v.x * 0.5 + 0.5) * rect.width;
+  const y = (-v.y * 0.5 + 0.5) * rect.height;
+  crosshairEl.style.left = x + 'px';
+  crosshairEl.style.top  = y + 'px';
+  crosshairEl.style.marginLeft = '-10px';
+  crosshairEl.style.marginTop = '-10px';
+  crosshairEl.style.display = 'block';
+}
+
+function updateHover() {
+  if (!terrainMesh || !currentData) {
+    hoverInfoEl.textContent = 'Hover the terrain to see elevation.';
+    return;
+  }
+  raycaster.setFromCamera(mouseNDC, camera);
+  const hits = raycaster.intersectObject(terrainMesh);
+  if (hits.length) {
+    const pt = hits[0].point;
+    const g = worldToGrid(pt.x, pt.z);
+    const elev = sampleElevation(g.gx, g.gy);
+
+    let tileName = '(none)';
+    if (tileMap && tileFilenames.length) {
+      const ix = Math.round(g.gx), iy = Math.round(g.gy);
+      if (ix >= 0 && iy >= 0 && ix < currentWidth && iy < currentHeight) {
+        const tIdx = tileMap[iy * currentWidth + ix];
+        if (tIdx !== 0xFFFF && tIdx < tileFilenames.length) tileName = tileFilenames[tIdx];
+      }
+    }
+
+    let geoText = '';
+    if (gridLat0 !== null) {
+      const { lat, lon } = gridToLatLon(g.gx, g.gy);
+      geoText = '\nLat ' + lat.toFixed(5) + ', Lon ' + lon.toFixed(5);
+    }
+
+    hoverInfoEl.textContent =
+      'Elevation: ' + elev.toFixed(0) + ' m' + geoText + '\n' +
+      'Grid: ' + g.gx.toFixed(0) + ', ' + g.gy.toFixed(0) + '\n' +
+      'Tile: ' + tileName +
+      (pickPoint ? '\nPick: ' + pickPoint.gx.toFixed(0) + ', ' + pickPoint.gy.toFixed(0) +
+                   ' @ ' + pickPoint.elev.toFixed(0) + ' m' : '');
+
+    if (pickPoint && mode === 'orbit') positionCrosshairAtPick();
+  } else {
+    hoverInfoEl.textContent = 'Hover the terrain to see elevation.';
+    if (pickPoint && mode === 'orbit') positionCrosshairAtPick();
+  }
+}
+
+renderer.domElement.addEventListener('click', (e) => {
+  if (!terrainMesh) return;
+  raycaster.setFromCamera(mouseNDC, camera);
+  const hits = raycaster.intersectObject(terrainMesh);
+  if (!hits.length) return;
+
+  const pt = hits[0].point;
+  const g = worldToGrid(pt.x, pt.z);
+  const elev = sampleElevation(g.gx, g.gy);
+
+  if (mode === 'orbit') {
+    pickPoint = { gx: g.gx, gy: g.gy, elev };
+    ensureStartMarker();
+    const vex = vexScale();
+    startMarker.position.set(pt.x, elev * vex + 0.5, pt.z);
+    startMarker.visible = true;
+    rebuildVision();
+    positionCrosshairAtPick();
+    updateWalkButtonState();
+    updatePickInputs();
+    log('Picked (' + g.gx.toFixed(0) + ',' + g.gy.toFixed(0) + ') @ ' + elev.toFixed(0) + ' m — Walk Mode enabled');
+  }
+});
+
+const WALK_SPEED = 12;
+const clock = new THREE.Clock();
+const PROBE_DISTANCES = [1, 3, 8, 15];
+
+function updateWalk(dt) {
+  if (mode !== 'walk') return;
+  const vex = vexScale();
+  const eye = eyeHeight();
+  const speed = WALK_SPEED * (keys['ShiftLeft'] ? 3 : 1) * dt;
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  fwd.y = 0;
+  if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+  fwd.normalize();
+  const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
+
+  const move = new THREE.Vector3();
+  if (keys['KeyW'] || keys['ArrowUp'])    move.add(fwd);
+  if (keys['KeyS'] || keys['ArrowDown'])  move.sub(fwd);
+  if (keys['KeyD'] || keys['ArrowRight']) move.add(right);
+  if (keys['KeyA'] || keys['ArrowLeft'])  move.sub(right);
+
+  let cx = camera.position.x;
+  let cz = camera.position.z;
+  if (move.lengthSq() > 0) {
+    move.normalize().multiplyScalar(speed);
+    const halfX = currentExtentX / 2;
+    const halfZ = currentExtentZ / 2;
+    cx = Math.max(-halfX, Math.min(halfX, cx + move.x));
+    cz = Math.max(-halfZ, Math.min(halfZ, cz + move.z));
+  }
+
+  const groundHere = sampleElevationWorld(cx, cz) * vex;
+  let targetY = groundHere + eye;
+  const fx = fwd.x, fz = fwd.z;
+  for (const d of PROBE_DISTANCES) {
+    const px = cx + fx * d;
+    const pz = cz + fz * d;
+    const pe = sampleElevationWorld(px, pz) * vex;
+    if (pe + eye > targetY) targetY = pe + eye;
+  }
+  camera.position.set(cx, targetY, cz);
+}
+
+function updateAzimuth() {
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  let az = Math.atan2(dir.x, -dir.z) * 180 / Math.PI;
+  if (az < 0) az += 360;
+  azimuthBox.textContent = 'Az: ' + az.toFixed(0).padStart(3, '0') + '°';
+}
+
+function drawGizmo() {
+  const w = gizmoEl.width, h = gizmoEl.height;
+  const cx = w / 2, cy = h / 2, R = 36;
+  gizmoCtx.clearRect(0, 0, w, h);
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0,1,0)).normalize();
+  const up = new THREE.Vector3().crossVectors(right, dir).normalize();
+  gizmoCtx.strokeStyle = '#4a6a9a';
+  gizmoCtx.lineWidth = 1;
+  gizmoCtx.beginPath();
+  gizmoCtx.arc(cx, cy, R + 6, 0, Math.PI * 2);
+  gizmoCtx.stroke();
+  const axes = [
+    { v: new THREE.Vector3(1, 0, 0), c: '#ff5533', label: 'E' },
+    { v: new THREE.Vector3(0, 1, 0), c: '#55ff88', label: 'U' },
+    { v: new THREE.Vector3(0, 0, -1), c: '#5aaaff', label: 'N' }
+  ];
+  for (const a of axes) {
+    const sx = a.v.dot(right), sy = a.v.dot(up);
+    const endX = cx + sx * R, endY = cy - sy * R;
+    gizmoCtx.strokeStyle = a.c; gizmoCtx.lineWidth = 2;
+    gizmoCtx.beginPath(); gizmoCtx.moveTo(cx, cy); gizmoCtx.lineTo(endX, endY); gizmoCtx.stroke();
+    gizmoCtx.fillStyle = a.c;
+    gizmoCtx.font = 'bold 10px system-ui';
+    gizmoCtx.textAlign = 'center'; gizmoCtx.textBaseline = 'middle';
+    gizmoCtx.fillText(a.label, endX + (sx >= 0 ? 8 : -8), endY + (sy >= 0 ? -8 : 8));
+  }
+  gizmoCtx.fillStyle = '#e8eefc';
+  gizmoCtx.beginPath(); gizmoCtx.arc(cx, cy, 2.5, 0, Math.PI * 2); gizmoCtx.fill();
+}
+
+// ---------------------------------------------------------------------------
+// Overlays
+// ---------------------------------------------------------------------------
+function updateOverlays() {
+  if (showContours) rebuildContours();
+  if (showRidges) rebuildRidges();
+  if (showTileBorders) rebuildTileBorders();
+}
+
+function rebuildContours() {
+  if (contourGroup) {
+    scene.remove(contourGroup);
+    contourGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    contourGroup = null;
+  }
+  if (!currentData || currentWidth < 2) return;
+  const W = currentWidth, H = currentHeight;
+  const vex = vexScale();
+  const interval = +conSlider.value;
+  const group = new THREE.Group();
+  const mat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 });
+  const step = Math.max(W, H) > 2000 ? 2 : 1;
+  const gx2wx = (gx) => (gx / (W - 1) - 0.5) * currentExtentX;
+  const gy2wz = (gy) => (gy / (H - 1) - 0.5) * currentExtentZ;
+  for (let level = Math.ceil(heightStats.min/interval)*interval; level < heightStats.max; level += interval) {
+    const positions = [];
+    marchingSquaresLevel(currentData, W, H, level, step, (x1,y1,x2,y2) => {
+      const yw = level * vex;
+      positions.push(gx2wx(x1), yw, gy2wz(y1));
+      positions.push(gx2wx(x2), yw, gy2wz(y2));
+    });
+    if (positions.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      group.add(new THREE.LineSegments(g, mat));
+    }
+  }
+  scene.add(group);
+  contourGroup = group;
+}
+
+function marchingSquaresLevel(data, W, H, level, step, emit) {
+  for (let y = 0; y < H - step; y += step) {
+    const row0 = data[y];
+    const row1 = data[y + step];
+    for (let x = 0; x < W - step; x += step) {
+      const v0 = row0[x], v1 = row0[x+step];
+      const v2 = row1[x+step], v3 = row1[x];
+      if (isNaN(v0) || isNaN(v1) || isNaN(v2) || isNaN(v3)) continue;
+      let idx = 0;
+      if (v0 > level) idx |= 8;
+      if (v1 > level) idx |= 4;
+      if (v2 > level) idx |= 2;
+      if (v3 > level) idx |= 1;
+      if (idx === 0 || idx === 15) continue;
+      const top    = () => [x + step*(level - v0)/(v1 - v0), y];
+      const right  = () => [x + step, y + step*(level - v1)/(v2 - v1)];
+      const bottom = () => [x + step*(level - v3)/(v2 - v3), y + step];
+      const left   = () => [x, y + step*(level - v0)/(v3 - v0)];
+      const seg = (a, b) => emit(a[0], a[1], b[0], b[1]);
+      switch (idx) {
+        case 1: case 14: seg(left(), bottom()); break;
+        case 2: case 13: seg(bottom(), right()); break;
+        case 3: case 12: seg(left(), right()); break;
+        case 4: case 11: seg(top(), right()); break;
+        case 6: case 9:  seg(top(), bottom()); break;
+        case 7: case 8:  seg(left(), top()); break;
+        case 5:  seg(left(), top()); seg(bottom(), right()); break;
+        case 10: seg(top(), right()); seg(left(), bottom()); break;
+      }
+    }
+  }
+}
+
+function rebuildRidges() {
+  if (ridgeGroup) {
+    scene.remove(ridgeGroup);
+    ridgeGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    ridgeGroup = null;
+  }
+  if (!currentData || currentWidth < 2) return;
+  const W = currentWidth, H = currentHeight;
+  const vex = vexScale();
+  const data = currentData;
+  const step = Math.max(W, H) > 1200 ? 4 : 2;
+  const w = Math.floor((W - 1) / step) + 1;
+  const h = Math.floor((H - 1) / step) + 1;
+  const grid = new Float32Array(w * h);
+  for (let j = 0; j < h; j++)
+    for (let i = 0; i < w; i++)
+      grid[j*w+i] = data[Math.min(H-1, j*step)][Math.min(W-1, i*step)];
+  const threshold = (heightStats.max - heightStats.min) * 0.002 + 1;
+  const ridgeCells = [];
+  const cutoff = heightStats.min + (heightStats.max - heightStats.min) * 0.35;
+  for (let j = 1; j < h-1; j++) {
+    for (let i = 1; i < w-1; i++) {
+      const hv = grid[j*w+i];
+      if (isNaN(hv) || hv < cutoff) continue;
+      const n = grid[(j-1)*w+i], s = grid[(j+1)*w+i];
+      const e = grid[j*w+(i+1)], ww = grid[j*w+(i-1)];
+      if (isNaN(n) || isNaN(s) || isNaN(e) || isNaN(ww)) continue;
+      if ((hv - Math.max(n,s)) > threshold || (hv - Math.max(e,ww)) > threshold)
+        ridgeCells.push([i, j, hv]);
+    }
+  }
+  const positions = [];
+  const key = (i,j) => j*100000 + i;
+  const lookup = new Map();
+  for (const c of ridgeCells) lookup.set(key(c[0], c[1]), c);
+  const gx2wx = (gx) => (gx / (W - 1) - 0.5) * currentExtentX;
+  const gy2wz = (gy) => (gy / (H - 1) - 0.5) * currentExtentZ;
+  for (const [i, j, hv] of ridgeCells) {
+    if (!isFinite(hv)) continue;
+    for (const [ni,nj] of [[i+1,j],[i,j+1],[i+1,j+1],[i-1,j+1]]) {
+      const o = lookup.get(key(ni,nj));
+      if (!o || !isFinite(o[2])) continue;
+      positions.push(gx2wx(i*step), hv*vex + 2, gy2wz(j*step));
+      positions.push(gx2wx(ni*step), o[2]*vex + 2, gy2wz(nj*step));
+    }
+  }
+  if (!positions.length) return;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const m = new THREE.LineBasicMaterial({ color: 0xff5533, transparent: true, opacity: 0.9 });
+  ridgeGroup = new THREE.LineSegments(g, m);
+  scene.add(ridgeGroup);
+}
+
+function rebuildTileBorders() {
+  if (tileBorderGroup) {
+    scene.remove(tileBorderGroup);
+    tileBorderGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    tileBorderGroup = null;
+  }
+  if (!currentData || !tileRanges.length) return;
+  const W = currentWidth, H = currentHeight;
+  const vex = vexScale();
+  const group = new THREE.Group();
+  const gx2wx = (gx) => (gx / (W - 1) - 0.5) * currentExtentX;
+  const gy2wz = (gy) => (gy / (H - 1) - 0.5) * currentExtentZ;
+  const palette = [0xffaa44, 0x44ddff, 0x88ff88, 0xff66cc, 0xffdd44, 0xaa88ff, 0x44ffaa, 0xff8855];
+  for (let ti = 0; ti < tileRanges.length; ti++) {
+    const tr = tileRanges[ti];
+    const color = palette[ti % palette.length];
+    const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 });
+    const gx0 = tr.ox, gx1 = tr.ox + tr.size - 1;
+    const gy0 = tr.oy, gy1 = tr.oy + tr.size - 1;
+    const SAMPLE = 32;
+    function edge(xa, ya, xb, yb) {
+      const positions = [];
+      let prevX = xa, prevY = ya;
+      let prevH = sampleElevation(prevX, prevY);
+      for (let s = 1; s <= SAMPLE; s++) {
+        const t = s / SAMPLE;
+        const cx = xa + (xb - xa) * t;
+        const cy = ya + (yb - ya) * t;
+        const h = sampleElevation(cx, cy);
+        if (isFinite(prevH) && isFinite(h)) {
+          positions.push(gx2wx(prevX), prevH * vex + 0.5, gy2wz(prevY));
+          positions.push(gx2wx(cx),    h * vex + 0.5,    gy2wz(cy));
+        }
+        prevX = cx; prevY = cy; prevH = h;
+      }
+      if (positions.length) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        group.add(new THREE.LineSegments(g, mat));
+      }
+    }
+    edge(gx0, gy0, gx1, gy0);
+    edge(gx1, gy0, gx1, gy1);
+    edge(gx1, gy1, gx0, gy1);
+    edge(gx0, gy1, gx0, gy0);
+  }
+  scene.add(group);
+  tileBorderGroup = group;
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.1, clock.getDelta());
+  if (mode === 'walk') updateWalk(dt);
+  else if (mode === 'orbit') controls.update();
+  if (mode === 'walk') {
+    updateAzimuth();
+    drawGizmo();
+  }
+  updateHover();
+  renderer.render(scene, camera);
+  if (pickPoint && mode === 'orbit') positionCrosshairAtPick();
+}
+animate();
+</script>
+</body>
+</html>
